@@ -1,8 +1,34 @@
 # AI Conductor Benchmarks
 
-Compare **execution** using AI Conductor's daemon with direct Claude Code or Codex on the same Rails application. Measure final output quality, elapsed execution time, and active human attention. Specification/plan preparation, image building, initial authentication, and independent grading happen outside the execution clock.
+AI Conductor Benchmarks is the repeatable release evaluation project for **AI Conductor**. It runs the same small, medium, and large Rails feature requests through the harness daemon and through Claude Code or Codex directly, then records what each workflow delivered and what it cost in execution time and human attention.
 
-**This repository is setup, not completed evaluation results. No agent trials have been run.** See [setup validation](docs/setup-validation.md) for what was checked and what remains unexercised.
+Run the benchmark suite for each harness release to answer:
+
+- Which requested behaviors work, fail, remain incomplete, or have not been tested?
+- Did this release improve or regress output quality compared with the previous release?
+- How much execution time and active human involvement does the harness save or add compared with direct agents?
+
+Fizzy is the fixed Rails application used as the test fixture. This project evaluates the **whole harness execution workflow**, not individual skills or Fizzy as a product. Plans are prepared and approved ahead of time. Planning, installation, authentication, and independent grading are excluded from the execution clock.
+
+**All publication belongs to [jstoup111/ai-conductor-benchmarks](https://github.com/jstoup111/ai-conductor-benchmarks). Never push or open benchmark PRs against basecamp/fizzy.** Fizzy's original URL is retained only as source attribution. Root and trial Git push hooks reject every destination except your fork; trial GitHub CLI commands default explicitly to your fork with `GH_REPO`.
+
+## Release evaluation
+
+For each release, freeze the harness source commit, fixture, feature briefs, provider models, permission policy, resources, and assessment rubric. Rebuild the harness image from that release's checkout and use its release label for **all four arms**, including the direct baselines. Run the same three tasks with repetitions, then compare matched configurations against the previous release. A model, task or fixture change defines a different comparison cohort and must be called out.
+
+```bash
+# Setup only; does not execute trials.
+scripts/build-harness /path/to/harness-release-checkout
+scripts/bench schedule --repeats 2 --seed 42 > schedule.json
+
+# After later execution and independent assessment:
+scripts/bench report --release vX.Y.Z
+scripts/bench report --release vX.Y.Z --csv > release-results.csv
+```
+
+Each run records its release label, harness source commit where applicable, image ID, task/criteria, model settings, output evidence, quality assessment, time, and attention. JSON reports retain individual criterion results so a partially delivered feature is visible instead of being reduced to an unexplained score. Failures, timeouts, ungraded runs, and incomplete telemetry remain visible.
+
+Use [reports/TEMPLATE.md](reports/TEMPLATE.md) to record a release's capabilities, gaps, and comparison with the previous release. Do not mark missing results as failures or untested behavior as supported. The runner exports measurements; the release interpretation is reviewed and written separately. No release evaluations have been run yet. [Setup validation](docs/setup-validation.md) states what has actually been checked.
 
 ## Repository layout
 
@@ -57,21 +83,21 @@ Choose explicit model IDs. Profiles use normal interactive permission behavior; 
 
 ```bash
 # Creates a fresh workspace/container and prepares Rails; no agent starts yet.
-scripts/bench prepare small claude --model YOUR_CLAUDE_MODEL --effort high
-scripts/bench prepare small codex --model YOUR_CODEX_MODEL --effort high
+scripts/bench prepare small claude --release vX.Y.Z --model YOUR_CLAUDE_MODEL --effort high
+scripts/bench prepare small codex --release vX.Y.Z --model YOUR_CODEX_MODEL --effort high
 
 # Alternative: exactly one pre-approved feature package, prepared before execution.
-scripts/bench prepare small harness-claude --model YOUR_CLAUDE_MODEL --publish \
+scripts/bench prepare small harness-claude --release vX.Y.Z --model YOUR_CLAUDE_MODEL --publish \
   --prepared /path/to/prepared/small-claude
 ```
 
-Normal daemon SHIP requires `--publish`. For matched comparisons, pass `--publish` to direct trials too; it adds identical publication authorization to their prompts. Configure a dedicated remote and GitHub login in preparation; `start` refuses publication trials until their frozen baseline is present on that remote. It never pushes during preparation automatically.
+Normal daemon SHIP requires `--publish`. For matched comparisons, pass `--publish` to direct trials too; it adds identical publication authorization to their prompts. The runner configures only your fork as `origin`. Authenticate GitHub and publish the printed trial base branch during preparation; `start` checks the fork URLs and that exact baseline. It never pushes during preparation automatically.
 
 Only one container can bind the default port 3006. Prepare/run sequentially, or select a distinct `--port`. Use the printed run ID in the commands below. Only explicitly named API-key variables are passed into a container; host home/config/skills are never mounted. Alternatively, authenticate inside its fresh home:
 
 ```bash
 scripts/bench login RUN_ID
-# For daemon SHIP: configure dedicated GitHub remote/auth before start; see docs/harness.md.
+# For daemon SHIP: authenticate GitHub and publish the trial base branch to your fork before start; see docs/harness.md.
 scripts/bench configure RUN_ID
 scripts/bench start RUN_ID
 ```
@@ -114,8 +140,8 @@ Reports include failures/ungraded runs, execution seconds, session seconds, huma
 - Only `.runs/RUN_ID/workspace` is writable through a host bind mount. No Docker socket, benchmark grader, root README, host home, or results ledger is exposed.
 - Every container has its own provider home. Fresh baselines exclude provider skill/config directories and host hook directories; the same ordinary Fizzy guidance is given to both providers.
 - Harness images install the harness from a committed source snapshot. Prepared plans/configuration are hashed into the run manifest before execution.
-- Host lifecycle events are serialized and flushed to `.runs/RUN_ID/events.jsonl`; agent exit cannot mint a passing assessment. Conductor's own `.pipeline` ledgers are copied unchanged as supplementary evidence, not rewritten into invented engine events.
+- The trial push hook is mounted read-only outside the agent workspace and rejects other repositories. Host lifecycle events are serialized and flushed to `.runs/RUN_ID/events.jsonl`; agent exit cannot mint a passing assessment. Conductor's own `.pipeline` ledgers are copied unchanged as supplementary evidence, not rewritten into invented engine events.
 - Output inventories, tracked diffs, the full retained workspace (including untracked files and harness worktrees), and terminal logs support later inspection. Provider-native histories are best-effort supplementary evidence, not a required timing source.
 - `.runs` is gitignored. Logs can contain task content and operator-entered secrets; keep raw artifacts local. Authentication should happen before recording begins.
 
-Fizzy is licensed under [O'Saasy](fixtures/fizzy/LICENSE.md); additional notices remain in its source tree. This repository retains upstream history and the `upstream` remote for provenance. Publishing a separate GitHub repository is a separate action.
+Fizzy is licensed under [O'Saasy](fixtures/fizzy/LICENSE.md); additional notices remain in its source tree. This repository retains upstream history and source attribution. There is no `upstream` Git remote; `origin` is your fork. Trial branches live under `benchmarks/<release>/<run>/` in that fork, leaving its main branch unchanged.

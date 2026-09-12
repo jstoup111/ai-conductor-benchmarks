@@ -1,0 +1,12 @@
+#!/usr/bin/env python3
+"""Reject accidental publication anywhere except the operator's benchmark fork."""
+import sys
+ALLOWED = {
+    'https://github.com/jstoup111/ai-conductor-benchmarks.git',
+    'https://github.com/jstoup111/ai-conductor-benchmarks',
+    'git@github.com:jstoup111/ai-conductor-benchmarks.git',
+    'git@github.com:jstoup111/ai-conductor-benchmarks',
+    'ssh://git@github.com/jstoup111/ai-conductor-benchmarks.git',
+}
+if len(sys.argv) < 3 or sys.argv[2] not in ALLOWED:
+    sys.exit('Push refused: only jstoup111/ai-conductor-benchmarks is allowed. Never publish to basecamp/fizzy.')

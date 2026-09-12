@@ -112,8 +112,8 @@ class LifecycleTests(unittest.TestCase):
         self.m.update(publish=True, input_inventory={}, baseline_commit='expected')
         b.write_json(self.path/'manifest.json', self.m)
         self.emit('preparation_completed')
-        with patch.object(b, 'capture', side_effect=['origin', 'wrong refs/heads/main']), patch.object(b, 'call') as call:
-            with self.assertRaisesRegex(ValueError, 'frozen main baseline'):
+        with patch.object(b, 'capture', side_effect=['origin', b.FORK_URL, b.FORK_URL, 'wrong refs/heads/main']), patch.object(b, 'call') as call:
+            with self.assertRaisesRegex(ValueError, 'frozen trial base branch'):
                 b.start(argparse.Namespace(run='run'))
             self.assertEqual(call.call_args.args[0], ['docker','exec','acb-exact-test','gh','auth','status'])
         self.assertIsNone(b.latest(b.events(self.path), 'run_started'))
@@ -242,3 +242,31 @@ class EvidenceTests(unittest.TestCase):
                 self.assertEqual(archive.extractfile('workspace/app/new.rb').read(), b'version one')
             with tarfile.open(archives[1]) as archive:
                 self.assertEqual(archive.extractfile('workspace/app/new.rb').read(), b'version two')
+
+class PublicationAndReleaseTests(unittest.TestCase):
+    def test_hook_accepts_only_operator_fork(self):
+        import subprocess
+        hook = b.ROOT/'scripts/hooks/pre-push'
+        cases = {
+            b.FORK_URL: True,
+            'git@github.com:jstoup111/ai-conductor-benchmarks.git': True,
+            'https://github.com/basecamp/fizzy.git': False,
+            'git@github.com:basecamp/fizzy.git': False,
+            'https://github.com/jstoup111/fizzy.git': False,
+            'https://github.com.evil.invalid/jstoup111/ai-conductor-benchmarks.git': False,
+        }
+        for url, allowed in cases.items():
+            # Invoke the pure hook directly: never contact any git remote.
+            result = subprocess.run([str(hook), 'origin', url], capture_output=True)
+            self.assertEqual(result.returncode == 0, allowed, url)
+
+    def test_release_and_criterion_results_survive_report(self):
+        m = dict(run_id='r', task='small', profile='harness-claude', model='fixed', effort='high',
+                 release='v1.2.3', harness_commit='abc')
+        rows = [row('run_started', 0), row('run_finished', 20, outcome='completed'),
+                row('assessment_recorded', 30, accepted=False, passed=1, total=2,
+                    critical_defects=0, maintainability=3, criteria={'S1':True,'S2':False})]
+        report = b.summarize(m, rows)
+        self.assertEqual(report['release'], 'v1.2.3')
+        self.assertEqual(report['harness_commit'], 'abc')
+        self.assertEqual(report['criteria'], {'S1':True,'S2':False})

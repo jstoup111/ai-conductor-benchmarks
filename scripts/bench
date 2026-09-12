@@ -20,6 +20,8 @@ from contextlib import contextmanager
 
 ROOT = Path(__file__).resolve().parents[1]
 RUNS = ROOT / '.runs'
+FORK = 'jstoup111/ai-conductor-benchmarks'
+FORK_URL = 'https://github.com/' + FORK + '.git'
 CATEGORIES = ('monitoring', 'clarification', 'approval', 'steering', 'rescue')
 BLOCKED = {'.git', '.claude', '.codex', '.agents', '.githooks', '.mcp.json', 'CLAUDE.md'}
 
@@ -157,6 +159,7 @@ def summarize(m, rows):
         requests += stop - request['mono']
     grade = latest(rows, 'assessment_recorded')
     return dict(run_id=m['run_id'], task=m['task'], profile=m['profile'],
+                release=m.get('release', 'unlabeled'), harness_commit=m.get('harness_commit'),
                 model=m['model'], effort=m['effort'], publish=m.get('publish', False),
                 status=end['outcome'] if end else ('running' if start else ('setup_failed' if latest(rows, 'preparation_failed') else 'prepared')),
                 execution_seconds=round(stop-start['mono'], 3) if start else None,
@@ -170,6 +173,7 @@ def summarize(m, rows):
                 accepted=grade['accepted'] if grade else None,
                 criteria_passed=grade['passed'] if grade else None,
                 criteria_total=grade['total'] if grade else None,
+                criteria=grade.get('criteria') if grade else None,
                 critical_defects=grade['critical_defects'] if grade else None,
                 maintainability=grade['maintainability'] if grade else None)
 
@@ -195,6 +199,8 @@ def copy_fixture(source, target):
 
 
 def prepare(args):
+    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,63}', args.release):
+        raise ValueError('Release must be a short label such as v1.2.3')
     profile = profiles()[args.profile]
     task = json.loads((ROOT / 'benchmarks' / args.task / 'task.json').read_text())
     if profile['harness'] and not args.publish:
@@ -205,6 +211,7 @@ def prepare(args):
         raise ValueError('Direct trials cannot receive harness preparation')
     image_id = capture(['docker', 'image', 'inspect', '--format', '{{.Id}}', profile['image']])
     name = f'{args.task}-{args.profile}-{uuid.uuid4().hex[:8]}'
+    base_branch = f'benchmarks/{args.release}/{name}/base'
     path = RUNS / name
     path.mkdir(parents=True)
     (path / 'events.jsonl').touch()
@@ -231,14 +238,18 @@ def prepare(args):
     (app / 'BENCHMARK_TASK.md').write_text(prompt)
     write_json(path / 'task.json', task)
     write_json(path / 'baseline-inventory.json', base_inventory)
-    call(['git', 'init', '-b', 'main', app], stdout=subprocess.DEVNULL)
+    call(['git', 'init', '-b', base_branch, app], stdout=subprocess.DEVNULL)
     call(['git', '-C', app, 'add', '.'])
     call(['git', '-C', app, '-c', 'user.name=Benchmark', '-c', 'user.email=bench@invalid',
           'commit', '-m', 'Frozen trial baseline'], stdout=subprocess.DEVNULL)
+    call(['git', '-C', app, 'remote', 'add', 'origin', FORK_URL])
+    call(['git', '-C', app, 'symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/' + base_branch])
+    call(['git', '-C', app, 'config', 'core.hooksPath', '/opt/benchmark-hooks'])
     if not profile['harness']:
-        call(['git', '-C', app, 'checkout', '-b', 'trial'], stdout=subprocess.DEVNULL)
+        call(['git', '-C', app, 'checkout', '-b', base_branch.removesuffix('/base') + '/implementation'], stdout=subprocess.DEVNULL)
     m = dict(run_id=name, task=args.task, profile=args.profile, profile_config=profile,
-             publish=args.publish,
+             publish=args.publish, release=args.release, base_branch=base_branch, publication_repository=FORK,
+             harness_commit=capture(['docker', 'image', 'inspect', '--format', '{{index .Config.Labels "benchmark.harness.commit"}}', image_id]) if profile['harness'] else None,
              model=args.model, effort=args.effort, image=image_id,
              baseline_commit=capture(['git', '-C', app, 'rev-parse', 'HEAD']),
              fixture= json.loads((ROOT / 'fixtures/UPSTREAM.json').read_text()),
@@ -255,6 +266,8 @@ def prepare(args):
                '--cap-drop=ALL', '--security-opt=no-new-privileges',
                '--user', f'{os.getuid()}:{os.getgid()}',
                '--mount', f'type=bind,src={app},dst=/workspace',
+               '--mount', f'type=bind,src={ROOT / "scripts/hooks"},dst=/opt/benchmark-hooks,readonly',
+               '-e', f'GH_REPO={FORK}',
                '-p', f'127.0.0.1:{args.port}:3006']
     for key in profile['auth_env']:
         if os.environ.get(key):
@@ -279,6 +292,8 @@ def prepare(args):
         print(f'Preparation failed. Evidence: {path}', file=sys.stderr)
         raise
     print(name)
+    print(f'Only publication destination: {FORK_URL}')
+    print(f'Publish baseline during preparation: git push -u origin {base_branch}')
     print(f'Login if needed: scripts/bench login {name}')
     print(f'Start: scripts/bench start {name}')
 
@@ -301,10 +316,18 @@ def start(args):
         if not first and m.get('publish'):
             if 'origin' not in capture(['git', '-C', path / 'workspace', 'remote']).splitlines():
                 raise ValueError('Configure a dedicated origin remote before execution')
+            for mode in ('--fetch', '--push'):
+                # Both fetch and push URLs must stay on the operator fork.
+                url_args = ['git', '-C', path / 'workspace', 'remote', 'get-url']
+                if mode == '--push':
+                    url_args += ['--push']
+                url = capture(url_args + ['origin'])
+                if url != FORK_URL:
+                    raise ValueError('Trial origin must be exactly ' + FORK_URL)
             call(['docker', 'exec', m['container'], 'gh', 'auth', 'status'])
-            remote_main = capture(['docker', 'exec', m['container'], 'git', 'ls-remote', 'origin', 'refs/heads/main'])
+            remote_main = capture(['docker', 'exec', m['container'], 'git', 'ls-remote', 'origin', 'refs/heads/' + m.get('base_branch', 'main')])
             if not remote_main or remote_main.split()[0] != m['baseline_commit']:
-                raise ValueError('Publish the frozen main baseline to the dedicated remote before execution')
+                raise ValueError('Publish the frozen trial base branch to your benchmark fork before execution')
         if not first:
             emit(path, 'run_started')
         start_time = (first or latest(events(path), 'run_started'))['mono']
@@ -455,7 +478,7 @@ def assess(args):
                     bool(latest(rows, 'final_capture_completed')))
         write_json(path / 'assessment.json', result)
         emit(path, 'assessment_recorded', accepted=accepted, passed=passed, total=len(expected),
-             critical_defects=result['critical_defects'], maintainability=result['maintainability'])
+             critical_defects=result['critical_defects'], maintainability=result['maintainability'], criteria=result['criteria'])
     write_json(path / 'summary.json', summarize(manifest(path), events(path)))
     print('accepted' if accepted else 'not accepted')
 
@@ -513,6 +536,7 @@ def main():
     p = sub.add_parser('prepare')
     p.add_argument('task', choices=['small', 'medium', 'large'])
     p.add_argument('profile', choices=list(profiles()))
+    p.add_argument('--release', required=True, help='Harness release/cohort label, used for direct baselines too')
     p.add_argument('--model', required=True)
     p.add_argument('--effort', default='high')
     p.add_argument('--prepared')
@@ -534,6 +558,7 @@ def main():
             p.add_argument('file')
     p = sub.add_parser('report')
     p.add_argument('--csv', action='store_true')
+    p.add_argument('--release', help='Show only one harness release/cohort')
     args = parser.parse_args()
     if args.cmd == 'list':
         for size in ('small', 'medium', 'large'):
@@ -596,8 +621,10 @@ def main():
         print('Container stopped. Finish as failed/abandoned; missing terminal data cannot be recovered.')
     elif args.cmd == 'report':
         rows = [summarize(manifest(p), events(p)) for p in sorted(RUNS.glob('*')) if (p/'manifest.json').exists()]
+        if args.release:
+            rows = [r for r in rows if r['release'] == args.release]
         if args.csv and rows:
-            fields = [k for k in rows[0] if k != 'human_by_category']
+            fields = [k for k in rows[0] if k not in {'human_by_category', 'criteria'}]
             writer = csv.DictWriter(sys.stdout, fieldnames=fields, extrasaction='ignore')
             writer.writeheader()
             writer.writerows(rows)
