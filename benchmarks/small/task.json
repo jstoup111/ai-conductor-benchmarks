@@ -1,0 +1,11 @@
+{
+  "title": "Card effort estimates",
+  "minutes_limit": 60,
+  "criteria": {
+    "S1": "An existing card starts unset; estimate can be set, changed, cleared, and survives reload.",
+    "S2": "Only 1, 2, 3, 5, 8 or unset are accepted; invalid input leaves prior value unchanged.",
+    "S3": "Detail and board preview show a labeled estimate only when set.",
+    "S4": "An unauthorized user or user in another account cannot read or mutate it.",
+    "S5": "Existing card workflows and existing records survive the migration."
+  }
+}

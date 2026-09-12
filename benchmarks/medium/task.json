@@ -1,0 +1,14 @@
+{
+  "title": "Card due dates and overdue filtering",
+  "minutes_limit": 150,
+  "criteria": {
+    "M1": "Date can be set, changed, cleared, and persists; existing cards remain undated.",
+    "M2": "Past dates accepted and malformed dates rejected atomically.",
+    "M3": "Date appears on detail and board preview; absent dates have no badge.",
+    "M4": "Overdue honors viewer timezone and strict earlier-than-today comparison.",
+    "M5": "Closing suppresses overdue; reopening restores it; clearing removes it.",
+    "M6": "Overdue combines with board, assignee, tag filters across pagination/refresh.",
+    "M7": "Direct requests and filter results preserve account and board authorization.",
+    "M8": "Existing filters and card workflows retain their behavior."
+  }
+}

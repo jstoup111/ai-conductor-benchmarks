@@ -1,0 +1,7 @@
+FROM ai-conductor-benchmarks:base
+USER root
+COPY --chown=bench:bench harness /opt/ai-conductor
+USER bench
+WORKDIR /opt/ai-conductor
+RUN bin/install --update --providers claude,codex --channel main </dev/null
+WORKDIR /workspace

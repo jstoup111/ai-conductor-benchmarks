@@ -1,0 +1,7 @@
+{
+  "project": "Fizzy",
+  "repository": "https://github.com/basecamp/fizzy.git",
+  "commit": "19a22eae3cf6562d0f6fc810ceedf7934e45d61f",
+  "license": "fizzy/LICENSE.md",
+  "snapshot_policy": "Keep baseline application source unchanged. Each trial receives a fresh copy."
+}

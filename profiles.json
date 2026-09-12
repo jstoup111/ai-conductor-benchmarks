@@ -1,0 +1,26 @@
+{
+  "claude": {
+    "provider": "claude", "harness": false,
+    "image": "ai-conductor-benchmarks:base",
+    "command": ["claude", "--model", "{model}", "--effort", "{effort}", "{prompt}"],
+    "auth_env": ["ANTHROPIC_API_KEY"]
+  },
+  "codex": {
+    "provider": "codex", "harness": false,
+    "image": "ai-conductor-benchmarks:base",
+    "command": ["codex", "--model", "{model}", "-c", "model_reasoning_effort=\"{effort}\"", "--sandbox", "workspace-write", "{prompt}"],
+    "auth_env": ["OPENAI_API_KEY"]
+  },
+  "harness-claude": {
+    "provider": "claude", "harness": true,
+    "image": "ai-conductor-benchmarks:harness",
+    "command": ["/home/bench/.local/bin/ai-conductor", "daemon", "--concurrency", "1", "--max-items", "1"],
+    "auth_env": ["ANTHROPIC_API_KEY"]
+  },
+  "harness-codex": {
+    "provider": "codex", "harness": true,
+    "image": "ai-conductor-benchmarks:harness",
+    "command": ["/home/bench/.local/bin/ai-conductor", "daemon", "--concurrency", "1", "--max-items", "1"],
+    "auth_env": ["OPENAI_API_KEY"]
+  }
+}

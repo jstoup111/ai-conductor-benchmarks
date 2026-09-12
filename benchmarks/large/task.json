@@ -1,0 +1,18 @@
+{
+  "title": "Card dependencies and blocking rules",
+  "minutes_limit": 300,
+  "criteria": {
+    "L1": "Authorized editor can add/remove prerequisites and relationships persist.",
+    "L2": "Detail shows both directions with accessible links and current state.",
+    "L3": "Self, duplicate, unpublished and cross-board/account links rejected without partial changes or leaks.",
+    "L4": "Direct and transitive cycles rejected, including a three-card cycle.",
+    "L5": "Preview shows accurate blocked badge/count; filter composes and paginates.",
+    "L6": "Every web/JSON/drop closure path refuses blocked cards; unblocked closure works.",
+    "L7": "Reopening prerequisites blocks open dependents but does not reopen closed dependents.",
+    "L8": "Removing links or deleting prerequisites updates blocking without deleting dependent cards.",
+    "L9": "Board moves refused while any link exists; unlinked moves unchanged.",
+    "L10": "Account/board access enforced on lists, mutations, filters and crafted requests.",
+    "L11": "Concurrent opposite additions cannot produce a cycle; closure/reopening is serializable.",
+    "L12": "Existing card workflows and records without dependencies retain behavior."
+  }
+}
