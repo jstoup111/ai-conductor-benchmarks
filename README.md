@@ -12,6 +12,16 @@ Fizzy is the fixed Rails application used as the test fixture. This project eval
 
 **All publication belongs to [jstoup111/ai-conductor-benchmarks](https://github.com/jstoup111/ai-conductor-benchmarks). Never push or open benchmark PRs against basecamp/fizzy.** Fizzy's original URL is retained only as source attribution. Root and trial Git push hooks reject every destination except your fork; trial GitHub CLI commands default explicitly to your fork with `GH_REPO`.
 
+## Benchmarks by harness version
+
+<!-- benchmark-results:start -->
+| Release | Task | Workflow / model | Runs | Accepted | Elapsed min | Human min | Interventions |
+| --- | --- | --- | ---: | ---: | ---: | ---: | ---: |
+| — | — | No archived results yet | 0 | — | — | — | — |
+<!-- benchmark-results:end -->
+
+This table is generated from reviewed public run records. No benchmark results have been fabricated. After a version cut, archive the assessed runs and regenerate the table as described in [run history](docs/run-history.md).
+
 ## Release evaluation
 
 For each release, freeze the harness source commit, fixture, feature briefs, provider models, permission policy, resources, and assessment rubric. Rebuild the harness image from that release's checkout and use its release label for **all four arms**, including the direct baselines. Run the same three tasks with repetitions, then compare matched configurations against the previous release. A model, task or fixture change defines a different comparison cohort and must be called out.
@@ -28,7 +38,22 @@ scripts/bench report --release vX.Y.Z --csv > release-results.csv
 
 Each run records its release label, harness source commit where applicable, image ID, task/criteria, model settings, output evidence, quality assessment, time, and attention. JSON reports retain individual criterion results so a partially delivered feature is visible instead of being reduced to an unexplained score. Failures, timeouts, ungraded runs, and incomplete telemetry remain visible.
 
-Use [reports/TEMPLATE.md](reports/TEMPLATE.md) to record a release's capabilities, gaps, and comparison with the previous release. Do not mark missing results as failures or untested behavior as supported. The runner exports measurements; the release interpretation is reviewed and written separately. No release evaluations have been run yet. [Setup validation](docs/setup-validation.md) states what has actually been checked.
+Use [reports/TEMPLATE.md](reports/TEMPLATE.md) for separate `reports/<release>-notes.md` commentary about capabilities, gaps, and comparisons. Generated `reports/<release>.md` pages are rebuilt from run records. Do not mark missing results as failures or untested behavior as supported. The runner generates this README’s metrics table and per-release detail pages; the interpretation is reviewed and written separately. No release evaluations have been run yet. [Setup validation](docs/setup-validation.md) states what has actually been checked.
+
+## Preserve and compare a finished run
+
+```bash
+# After finish + independent assessment; local archive only:
+scripts/bench archive-run RUN_ID
+# For a daemon run, add: --result-tree .worktrees/FEATURE_SLUG
+
+# After reviewing the exported code/metrics:
+scripts/bench publish-run RUN_ID
+scripts/bench release-report --release vX.Y.Z
+scripts/bench compare-runs OLD_RUN_ID NEW_RUN_ID
+```
+
+A run tag is `eval/<release>/<run-id>` and points to its captured implementation, not the benchmark tooling commit. The annotation preserves sanitized metrics; reports link exact commit SHAs for stable comparisons. The runner refuses replacement tags. Review generated result records and README changes in a PR to your fork, then merge that PR to update main. Locking the PR conversation adds no snapshot protection; see [run history](docs/run-history.md).
 
 ## Repository layout
 
@@ -40,6 +65,8 @@ benchmarks/{small,medium,large}/
   task.json          Acceptance criteria and initial time cap
   assessment.example.json
 scripts/bench        Host-side runner, attention controls, assessments, reports
+results/runs/        Reviewed public records for tagged runs
+results/releases/    Version cuts included in the README table
 scripts/build-harness  Build a separate image from a committed harness checkout
 docker/              Development images and application preparation
 profiles.json        Four execution configurations

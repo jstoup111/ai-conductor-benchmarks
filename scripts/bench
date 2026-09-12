@@ -383,7 +383,7 @@ def snapshot(path):
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(ledger, target)
     with locked(path):
-        emit(path, 'snapshot_saved', evidence=str(evidence.relative_to(path)))
+        emit(path, 'snapshot_saved', evidence=str(evidence.relative_to(path)), archive_sha256=digest(evidence / 'workspace.tar.gz'))
     # Provider histories are retained separately from trusted host measurements; no credential files.
     for source, label in [('/home/bench/.codex/sessions', 'codex-sessions'),
                           ('/home/bench/.claude/projects', 'claude-projects')]:
@@ -559,7 +559,24 @@ def main():
     p = sub.add_parser('report')
     p.add_argument('--csv', action='store_true')
     p.add_argument('--release', help='Show only one harness release/cohort')
+    p = sub.add_parser('archive-run')
+    p.add_argument('run')
+    p.add_argument('--runs-dir', help='Run storage in another worktree')
+    p.add_argument('--result-tree', help='Relative implementation tree inside the captured workspace; required for daemon runs')
+    p = sub.add_parser('publish-run')
+    p.add_argument('run')
+    p = sub.add_parser('release-report')
+    p.add_argument('--release', required=True)
+    p = sub.add_parser('compare-runs')
+    p.add_argument('old')
+    p.add_argument('new')
     args = parser.parse_args()
+    if args.cmd in {'archive-run', 'publish-run', 'release-report', 'compare-runs'}:
+        import results
+        action = {'archive-run': results.archive_run, 'publish-run': results.publish_run,
+                  'release-report': results.render_reports, 'compare-runs': results.compare_runs}[args.cmd]
+        action(sys.modules[__name__], args)
+        return
     if args.cmd == 'list':
         for size in ('small', 'medium', 'large'):
             task = json.loads((ROOT / 'benchmarks' / size / 'task.json').read_text())
