@@ -1,0 +1,613 @@
+#!/usr/bin/env python3
+"""Host-owned benchmark lifecycle and attention ledger. Python standard library only."""
+import argparse
+import csv
+import fcntl
+import hashlib
+import json
+import os
+from pathlib import Path
+import random
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+import threading
+import time
+import uuid
+from contextlib import contextmanager
+
+ROOT = Path(__file__).resolve().parents[1]
+RUNS = ROOT / '.runs'
+CATEGORIES = ('monitoring', 'clarification', 'approval', 'steering', 'rescue')
+BLOCKED = {'.git', '.claude', '.codex', '.agents', '.githooks', '.mcp.json', 'CLAUDE.md'}
+
+
+def call(args, **kwargs):
+    return subprocess.run([str(x) for x in args], check=True, **kwargs)
+
+
+def capture(args):
+    return call(args, stdout=subprocess.PIPE, text=True).stdout.strip()
+
+
+def write_json(path, value):
+    path.write_text(json.dumps(value, indent=2) + '\n')
+
+
+def digest(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def runtime_path(relative):
+    parts = Path(relative).parts
+    if set(parts) & {'.git', 'node_modules', '__pycache__'}:
+        return True
+    if parts and parts[0] in {'tmp', 'log', 'storage'}:
+        return True
+    return any(part in {'tmp', 'log', 'storage'} and i >= 2 and parts[i-2] == '.worktrees'
+               for i, part in enumerate(parts))
+
+
+def inventory(path):
+    result = {}
+    for file in sorted(path.rglob('*')):
+        if runtime_path(file.relative_to(path)):
+            continue
+        if file.is_symlink():
+            result[str(file.relative_to(path))] = 'symlink:' + os.readlink(file)
+        elif file.is_file():
+            result[str(file.relative_to(path))] = digest(file)
+    return result
+
+
+def run_dir(name):
+    if not re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9_-]{0,90}', name):
+        raise ValueError('Invalid run ID')
+    path = RUNS / name
+    if not (path / 'manifest.json').is_file():
+        raise ValueError('Unknown run: ' + name)
+    return path
+
+
+def manifest(path):
+    return json.loads((path / 'manifest.json').read_text())
+
+
+def events(path):
+    return [json.loads(line) for line in (path / 'events.jsonl').read_text().splitlines()]
+
+
+@contextmanager
+def locked(path):
+    with (path / '.lock').open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        yield
+
+
+def emit(path, kind, **data):
+    record = dict(schema=1, type=kind, ts=time.time(), mono=time.monotonic(), **data)
+    with (path / 'events.jsonl').open('a') as stream:
+        stream.write(json.dumps(record) + '\n')
+        stream.flush()
+        os.fsync(stream.fileno())
+
+
+def latest(rows, kind):
+    return next((e for e in reversed(rows) if e['type'] == kind), None)
+
+
+def assert_open(rows):
+    if latest(rows, 'run_finished'):
+        raise ValueError('Run already finished; create a new trial')
+
+
+def attention_open(rows):
+    a, b = latest(rows, 'attention_started'), latest(rows, 'attention_stopped')
+    return a if a and (not b or a['mono'] > b['mono']) else None
+
+
+def active_session(rows):
+    a, b = latest(rows, 'session_started'), latest(rows, 'session_exited')
+    return a if a and (not b or a['mono'] > b['mono']) else None
+
+
+def require_started(rows):
+    assert_open(rows)
+    if not latest(rows, 'run_started'):
+        raise ValueError('Execution has not started')
+
+
+def summarize(m, rows):
+    start, end = latest(rows, 'run_started'), latest(rows, 'run_finished')
+    stop = end['mono'] if end else time.monotonic()
+    human, sessions, requests = 0.0, 0.0, 0.0
+    attention, session, request = None, None, None
+    categories = {k: 0.0 for k in CATEGORIES}
+    interventions = 0
+    for row in rows:
+        kind = row['type']
+        if kind == 'attention_started':
+            attention = row
+            if row['category'] != 'monitoring':
+                interventions += 1
+        elif kind == 'attention_stopped' and attention:
+            seconds = row['mono'] - attention['mono']
+            human += seconds
+            categories[attention['category']] += seconds
+            attention = None
+        elif kind == 'session_started':
+            session = row
+        elif kind == 'session_exited' and session:
+            sessions += row['mono'] - session['mono']
+            session = None
+        elif kind == 'help_requested':
+            request = row
+        elif kind == 'help_resolved' and request:
+            requests += row['mono'] - request['mono']
+            request = None
+    if attention:
+        seconds = stop - attention['mono']
+        human += seconds
+        categories[attention['category']] += seconds
+    if session:
+        sessions += stop - session['mono']
+    if request:
+        requests += stop - request['mono']
+    grade = latest(rows, 'assessment_recorded')
+    return dict(run_id=m['run_id'], task=m['task'], profile=m['profile'],
+                model=m['model'], effort=m['effort'], publish=m.get('publish', False),
+                status=end['outcome'] if end else ('running' if start else ('setup_failed' if latest(rows, 'preparation_failed') else 'prepared')),
+                execution_seconds=round(stop-start['mono'], 3) if start else None,
+                session_seconds=round(sessions, 3), human_seconds=round(human, 3),
+                human_by_category={k: round(v, 3) for k, v in categories.items()},
+                intervention_episodes=interventions,
+                help_wait_seconds=round(requests, 3),
+                evidence_complete=bool(latest(rows, 'final_capture_completed')),
+                attention_measurement='self-reported',
+                attention_complete=end.get('attention_complete') if end else None,
+                accepted=grade['accepted'] if grade else None,
+                criteria_passed=grade['passed'] if grade else None,
+                criteria_total=grade['total'] if grade else None,
+                critical_defects=grade['critical_defects'] if grade else None,
+                maintainability=grade['maintainability'] if grade else None)
+
+
+def profiles():
+    result = json.loads((ROOT / 'profiles.json').read_text())
+    local = ROOT / 'profiles.local.json'
+    if local.exists():
+        result.update(json.loads(local.read_text()))
+    return result
+
+
+def copy_fixture(source, target):
+    # No host/provider configuration is carried into any fresh trial.
+    shutil.copytree(source, target, symlinks=True,
+                    ignore=lambda p, names: [n for n in names if n in BLOCKED])
+    for file in target.rglob('*'):
+        if file.is_symlink() and not file.resolve().is_relative_to(target.resolve()):
+            raise ValueError('Fixture symlink escapes workspace: ' + str(file))
+    # Identical ordinary project context for both provider hosts.
+    if (target / 'AGENTS.md').exists():
+        shutil.copyfile(target / 'AGENTS.md', target / 'CLAUDE.md')
+
+
+def prepare(args):
+    profile = profiles()[args.profile]
+    task = json.loads((ROOT / 'benchmarks' / args.task / 'task.json').read_text())
+    if profile['harness'] and not args.publish:
+        raise ValueError('Normal daemon SHIP requires --publish and a dedicated remote/auth prepared before start; see docs/harness.md')
+    if profile['harness'] and not args.prepared:
+        raise ValueError('Harness needs --prepared DIR containing accepted execution artifacts and .ai-conductor/config.yml; see docs/harness.md')
+    if not profile['harness'] and args.prepared:
+        raise ValueError('Direct trials cannot receive harness preparation')
+    image_id = capture(['docker', 'image', 'inspect', '--format', '{{.Id}}', profile['image']])
+    name = f'{args.task}-{args.profile}-{uuid.uuid4().hex[:8]}'
+    path = RUNS / name
+    path.mkdir(parents=True)
+    (path / 'events.jsonl').touch()
+    app = path / 'workspace'
+    copy_fixture(ROOT / 'fixtures/fizzy', app)
+    base_inventory = inventory(app)
+    if args.prepared:
+        source = Path(args.prepared).resolve()
+        allowed = {'.docs', '.pipeline', '.ai-conductor', '.benchmark', 'HARNESS.md', 'ARCHITECTURE.md', 'AGENTS.md', 'CLAUDE.md'}
+        if not (source / '.ai-conductor/config.yml').is_file():
+            raise ValueError('Prepared package must contain .ai-conductor/config.yml')
+        plans = list((source / '.docs/plans').glob('*.md'))
+        if len(plans) != 1:
+            raise ValueError('Prepared package must contain exactly one accepted .docs/plans/*.md')
+        if any(p.name not in allowed for p in source.iterdir()):
+            raise ValueError('Prepared package may contain only harness artifacts/config/instructions; no application code')
+        for item in source.rglob('*'):
+            if item.is_symlink():
+                raise ValueError('Prepared package must not contain symlinks')
+        shutil.copytree(source, app, dirs_exist_ok=True)
+    prompt = (ROOT / 'benchmarks' / args.task / 'prompt.md').read_text()
+    if args.publish:
+        prompt += '\nThe operator authorizes pushing only to the configured dedicated trial remote and creating a reviewable pull request there. Do not merge the PR. Publication is part of this trial’s completion endpoint.\n'
+    (app / 'BENCHMARK_TASK.md').write_text(prompt)
+    write_json(path / 'task.json', task)
+    write_json(path / 'baseline-inventory.json', base_inventory)
+    call(['git', 'init', '-b', 'main', app], stdout=subprocess.DEVNULL)
+    call(['git', '-C', app, 'add', '.'])
+    call(['git', '-C', app, '-c', 'user.name=Benchmark', '-c', 'user.email=bench@invalid',
+          'commit', '-m', 'Frozen trial baseline'], stdout=subprocess.DEVNULL)
+    if not profile['harness']:
+        call(['git', '-C', app, 'checkout', '-b', 'trial'], stdout=subprocess.DEVNULL)
+    m = dict(run_id=name, task=args.task, profile=args.profile, profile_config=profile,
+             publish=args.publish,
+             model=args.model, effort=args.effort, image=image_id,
+             baseline_commit=capture(['git', '-C', app, 'rev-parse', 'HEAD']),
+             fixture= json.loads((ROOT / 'fixtures/UPSTREAM.json').read_text()),
+             prompt_sha256=digest(app / 'BENCHMARK_TASK.md'),
+             input_inventory=inventory(app),
+             seconds_limit=args.minutes * 60 if args.minutes else task['minutes_limit'] * 60,
+             container='acb-' + uuid.uuid4().hex[:12], cpus=args.cpus, memory=args.memory,
+             created_at=time.time())
+    write_json(path / 'manifest.json', m)
+    emit(path, 'preparation_started')
+    # Only this workspace is mounted. Home is fresh inside the persistent trial container.
+    command = ['docker', 'run', '-d', '--name', m['container'], '--init',
+               '--cpus', str(args.cpus), '--memory', args.memory, '--shm-size', '1g',
+               '--cap-drop=ALL', '--security-opt=no-new-privileges',
+               '--user', f'{os.getuid()}:{os.getgid()}',
+               '--mount', f'type=bind,src={app},dst=/workspace',
+               '-p', f'127.0.0.1:{args.port}:3006']
+    for key in profile['auth_env']:
+        if os.environ.get(key):
+            command += ['-e', key]
+    command += [image_id, 'sleep', 'infinity']
+    try:
+        call(command, stdout=subprocess.DEVNULL)
+        with (path / 'prepare.log').open('w') as log:
+            call(['docker', 'exec', m['container'], 'prepare-app'], stdout=log, stderr=subprocess.STDOUT)
+        versions = capture(['docker', 'exec', m['container'], 'bash', '-lc',
+                            'ruby --version; claude --version; codex --version'])
+        (path / 'versions.txt').write_text(versions + '\n')
+        if profile['harness']:
+            (path / 'harness-version.txt').write_text(capture(
+                ['docker', 'exec', m['container'], '/home/bench/.local/bin/ai-conductor', '--version']))
+        # Database preparation can change ignored files; seal all source/artifacts after setup.
+        m['input_inventory'] = inventory(app)
+        write_json(path / 'manifest.json', m)
+        emit(path, 'preparation_completed')
+    except Exception:
+        emit(path, 'preparation_failed')
+        print(f'Preparation failed. Evidence: {path}', file=sys.stderr)
+        raise
+    print(name)
+    print(f'Login if needed: scripts/bench login {name}')
+    print(f'Start: scripts/bench start {name}')
+
+
+def start(args):
+    path = run_dir(args.run)
+    m = manifest(path)
+    with locked(path):
+        rows = events(path)
+        assert_open(rows)
+        if not latest(rows, 'preparation_completed'):
+            raise ValueError('Preparation did not complete')
+        if active_session(rows):
+            raise ValueError('Session already active. Use recover only after verifying the wrapper died')
+        if latest(rows, 'timed_out'):
+            raise ValueError('Execution budget exhausted; finish this run as timeout')
+        first = latest(rows, 'run_started')
+        if not first and inventory(path / 'workspace') != m['input_inventory']:
+            raise ValueError('Workspace changed after preparation; create a new trial')
+        if not first and m.get('publish'):
+            if 'origin' not in capture(['git', '-C', path / 'workspace', 'remote']).splitlines():
+                raise ValueError('Configure a dedicated origin remote before execution')
+            call(['docker', 'exec', m['container'], 'gh', 'auth', 'status'])
+            remote_main = capture(['docker', 'exec', m['container'], 'git', 'ls-remote', 'origin', 'refs/heads/main'])
+            if not remote_main or remote_main.split()[0] != m['baseline_commit']:
+                raise ValueError('Publish the frozen main baseline to the dedicated remote before execution')
+        if not first:
+            emit(path, 'run_started')
+        start_time = (first or latest(events(path), 'run_started'))['mono']
+        remaining = m['seconds_limit'] - (time.monotonic() - start_time)
+        if remaining <= 0:
+            emit(path, 'timed_out')
+            raise ValueError('Execution budget exhausted')
+        emit(path, 'session_started')
+    prompt = (path / 'workspace/BENCHMARK_TASK.md').read_text()
+    values = dict(model=m['model'], effort=m['effort'], prompt=prompt)
+    command = [part.format(**values) for part in m['profile_config']['command']]
+    docker = ['docker', 'exec', '-it', '-e', f'BENCH_MODEL={m["model"]}',
+              '-e', f'BENCH_EFFORT={m["effort"]}', m['container'], *command]
+    session_number = sum(e['type'] == 'session_started' for e in events(path))
+    def timeout():
+        with locked(path):
+            emit(path, 'timed_out')
+        subprocess.run(['docker', 'stop', '--time', '5', m['container']], stdout=subprocess.DEVNULL)
+    timer = threading.Timer(remaining, timeout)
+    timer.daemon = True
+    timer.start()
+    code = 1
+    try:
+        # util-linux script owns terminal forwarding and output capture, not the agent.
+        code = subprocess.call(['script', '-q', '-f', '-e', '-c', shlex.join(docker),
+                                str(path / f'terminal-{session_number}.log')])
+    finally:
+        timer.cancel()
+        with locked(path):
+            emit(path, 'session_exited', exit_code=code)
+        snapshot(path)
+    print('Session ended; this is not an acceptance verdict. Record attention and finish or start another session.')
+
+
+def snapshot(path):
+    m = manifest(path)
+    evidence = path / 'evidence' / (str(time.time_ns()) + '-' + uuid.uuid4().hex[:6])
+    evidence.mkdir(parents=True)
+    # Capture tracked and untracked changes, including harness-created worktrees, without mutating git.
+    (evidence / 'status.txt').write_text(capture(['git', '-C', path / 'workspace', 'status', '--short']))
+    with (evidence / 'tracked.patch').open('w') as stream:
+        call(['git', '-C', path / 'workspace', 'diff', '--binary', m['baseline_commit']], stdout=stream)
+    write_json(evidence / 'output-inventory.json', inventory(path / 'workspace'))
+    import tarfile
+    with tarfile.open(evidence / 'workspace.tar.gz', 'w:gz', dereference=False) as archive:
+        def source_only(info):
+            relative = Path(info.name).relative_to('workspace')
+            return None if runtime_path(relative) else info
+        archive.add(path / 'workspace', arcname='workspace', filter=source_only)
+    for ledger in (path / 'workspace').rglob('*.jsonl'):
+        if '.pipeline' in ledger.parts:
+            target = evidence / 'conductor' / ledger.relative_to(path / 'workspace')
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(ledger, target)
+    with locked(path):
+        emit(path, 'snapshot_saved', evidence=str(evidence.relative_to(path)))
+    # Provider histories are retained separately from trusted host measurements; no credential files.
+    for source, label in [('/home/bench/.codex/sessions', 'codex-sessions'),
+                          ('/home/bench/.claude/projects', 'claude-projects')]:
+        target = evidence / label
+        target.mkdir(exist_ok=True)
+        subprocess.run(['docker', 'cp', m['container'] + ':' + source + '/.', str(target)],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def mark(args):
+    path = run_dir(args.run)
+    with locked(path):
+        rows = events(path)
+        require_started(rows)
+        if args.action == 'on':
+            if attention_open(rows):
+                raise ValueError('Attention already on; stop before changing category')
+            emit(path, 'attention_started', category=args.category)
+        elif args.action == 'off':
+            if not attention_open(rows):
+                raise ValueError('Attention is already off')
+            emit(path, 'attention_stopped')
+        elif args.action == 'request':
+            a, b = latest(rows, 'help_requested'), latest(rows, 'help_resolved')
+            if a and (not b or a['mono'] > b['mono']):
+                raise ValueError('Help request already pending')
+            emit(path, 'help_requested')
+        elif args.action == 'resolve':
+            a, b = latest(rows, 'help_requested'), latest(rows, 'help_resolved')
+            if not a or (b and b['mono'] > a['mono']):
+                raise ValueError('No pending help request')
+            emit(path, 'help_resolved')
+        elif args.action == 'candidate':
+            emit(path, 'candidate_submitted')
+    if args.action == 'candidate':
+        snapshot(path)
+    print(args.action)
+
+
+def finish(args):
+    path = run_dir(args.run)
+    with locked(path):
+        rows = events(path)
+        require_started(rows)
+        if active_session(rows):
+            raise ValueError('Exit the trial session first (or recover a dead wrapper)')
+        if attention_open(rows):
+            emit(path, 'attention_stopped')
+        elapsed = time.monotonic() - latest(rows, 'run_started')['mono']
+        outcome = 'timeout' if latest(rows, 'timed_out') or elapsed >= manifest(path)['seconds_limit'] else args.outcome
+        emit(path, 'run_finished', outcome=outcome, attention_complete=args.attention_complete)
+    try:
+        # Freeze all daemon descendants before collecting final evidence.
+        call(['docker', 'stop', '--time', '5', manifest(path)['container']], stdout=subprocess.DEVNULL)
+        snapshot(path)
+        with locked(path):
+            emit(path, 'final_capture_completed')
+    except Exception:
+        with locked(path):
+            emit(path, 'final_capture_failed')
+        raise
+    finally:
+        write_json(path / 'summary.json', summarize(manifest(path), events(path)))
+    print(path / 'summary.json')
+
+
+def assess(args):
+    path = run_dir(args.run)
+    result = json.loads(Path(args.file).read_text())
+    task = json.loads((path / 'task.json').read_text())
+    expected = set(task['criteria'])
+    if set(result['criteria']) != expected or any(type(v) is not bool for v in result['criteria'].values()):
+        raise ValueError('Assessment must contain exactly the task criterion IDs with boolean values')
+    for field in ('reviewer', 'evidence'):
+        if not isinstance(result.get(field), str) or not result[field].strip():
+            raise ValueError('Assessment requires reviewer and evidence references')
+    if type(result.get('regressions_pass')) is not bool:
+        raise ValueError('regressions_pass must be boolean')
+    if type(result.get('critical_defects')) is not int or result['critical_defects'] < 0:
+        raise ValueError('critical_defects must be a nonnegative integer')
+    if type(result.get('maintainability')) is not int or not 1 <= result['maintainability'] <= 5:
+        raise ValueError('maintainability must be 1–5')
+    passed = sum(result['criteria'].values())
+    with locked(path):
+        rows = events(path)
+        if not latest(rows, 'run_finished'):
+            raise ValueError('Finish execution before independent grading')
+        if latest(rows, 'assessment_recorded'):
+            raise ValueError('Already assessed; assessments are immutable')
+        accepted = (passed == len(expected) and result['regressions_pass'] and
+                    result['critical_defects'] == 0 and latest(rows, 'run_finished')['outcome'] == 'completed' and
+                    bool(latest(rows, 'final_capture_completed')))
+        write_json(path / 'assessment.json', result)
+        emit(path, 'assessment_recorded', accepted=accepted, passed=passed, total=len(expected),
+             critical_defects=result['critical_defects'], maintainability=result['maintainability'])
+    write_json(path / 'summary.json', summarize(manifest(path), events(path)))
+    print('accepted' if accepted else 'not accepted')
+
+
+
+def attention_console(args):
+    keys = dict(m='monitoring', c='clarification', a='approval', s='steering', r='rescue')
+    print('Attention: m monitoring | c clarification | a approval | s steering | r rescue')
+    print('o away | h help requested | d help resolved | q quit (stops attention). Press Enter after a key.')
+    try:
+        while True:
+            key = input('attention> ').strip().lower()
+            path = run_dir(args.run)
+            if key in keys:
+                if attention_open(events(path)):
+                    mark(argparse.Namespace(run=args.run, action='off'))
+                mark(argparse.Namespace(run=args.run, action='on', category=keys[key]))
+            elif key in ('o', 'q'):
+                if attention_open(events(path)):
+                    mark(argparse.Namespace(run=args.run, action='off'))
+                if key == 'q':
+                    break
+            elif key in ('h', 'd'):
+                mark(argparse.Namespace(run=args.run, action='request' if key == 'h' else 'resolve'))
+    except (EOFError, KeyboardInterrupt):
+        path = run_dir(args.run)
+        if attention_open(events(path)) and not latest(events(path), 'run_finished'):
+            mark(argparse.Namespace(run=args.run, action='off'))
+
+
+def rescue_shell(args):
+    path = run_dir(args.run)
+    mark(argparse.Namespace(run=args.run, action='on', category='rescue'))
+    code = 1
+    try:
+        command = ['docker', 'exec', '-it', manifest(path)['container'], 'bash']
+        code = subprocess.call(['script', '-q', '-f', '-e', '-c', shlex.join(command),
+                                str(path / ('rescue-' + uuid.uuid4().hex[:8] + '.log'))])
+    finally:
+        with locked(path):
+            emit(path, 'rescue_shell_exited', exit_code=code)
+            if attention_open(events(path)):
+                emit(path, 'attention_stopped')
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    sub = parser.add_subparsers(dest='cmd', required=True)
+    sub.add_parser('list')
+    sub.add_parser('doctor')
+    sub.add_parser('build')
+    p = sub.add_parser('schedule')
+    p.add_argument('--repeats', type=int, default=2)
+    p.add_argument('--seed', type=int, default=42)
+    p = sub.add_parser('prepare')
+    p.add_argument('task', choices=['small', 'medium', 'large'])
+    p.add_argument('profile', choices=list(profiles()))
+    p.add_argument('--model', required=True)
+    p.add_argument('--effort', default='high')
+    p.add_argument('--prepared')
+    p.add_argument('--publish', action='store_true', help='Include publication to a dedicated trial remote in the completion endpoint (required for daemon)')
+    p.add_argument('--minutes', type=float)
+    p.add_argument('--cpus', type=int, default=4)
+    p.add_argument('--memory', default='8g')
+    p.add_argument('--port', type=int, default=3006)
+    for cmd in ('start', 'login', 'finish', 'recover', 'mark', 'assess', 'attention', 'shell', 'configure'):
+        p = sub.add_parser(cmd)
+        p.add_argument('run')
+        if cmd == 'mark':
+            p.add_argument('action', choices=['on', 'off', 'request', 'resolve', 'candidate'])
+            p.add_argument('--category', choices=CATEGORIES, default='monitoring')
+        if cmd == 'finish':
+            p.add_argument('--outcome', choices=['completed', 'failed', 'timeout', 'abandoned'], required=True)
+            p.add_argument('--attention-complete', action='store_true', help='Attest all active human intervals were recorded')
+        if cmd == 'assess':
+            p.add_argument('file')
+    p = sub.add_parser('report')
+    p.add_argument('--csv', action='store_true')
+    args = parser.parse_args()
+    if args.cmd == 'list':
+        for size in ('small', 'medium', 'large'):
+            task = json.loads((ROOT / 'benchmarks' / size / 'task.json').read_text())
+            print(f'{size}: {task["title"]} ({task["minutes_limit"]} minute cap)')
+    elif args.cmd == 'doctor':
+        if os.getuid() != 1000 or os.getgid() != 1000:
+            raise ValueError('Current image requires host UID/GID 1000. Adapt the image user before preparing trials.')
+        for tool in ('docker', 'git', 'script', 'python3'):
+            if not shutil.which(tool):
+                raise ValueError('Missing host executable: ' + tool)
+        print(capture(['docker', 'info', '--format', '{{.ServerVersion}}']))
+        print('Host ready. Build image, prepare a run, and authenticate inside that container.')
+    elif args.cmd == 'build':
+        call(['docker', 'build', '-f', ROOT / 'docker/Dockerfile', '-t', 'ai-conductor-benchmarks:base', ROOT])
+    elif args.cmd == 'schedule':
+        if args.repeats < 1:
+            raise ValueError('Repeats must be positive')
+        schedule = [dict(task=t, profile=p, repeat=r) for t in ('small', 'medium', 'large')
+                    for p in profiles() for r in range(1, args.repeats+1)]
+        random.Random(args.seed).shuffle(schedule)
+        print(json.dumps(dict(seed=args.seed, trials=schedule), indent=2))
+    elif args.cmd == 'prepare':
+        if args.minutes is not None and args.minutes <= 0:
+            raise ValueError('Minutes must be positive')
+        prepare(args)
+    elif args.cmd == 'start':
+        start(args)
+    elif args.cmd == 'login':
+        path = run_dir(args.run)
+        if latest(events(path), 'run_started'):
+            raise ValueError('Initial login must happen before execution')
+        m = manifest(path)
+        command = ['claude', 'auth', 'login'] if m['profile_config']['provider'] == 'claude' else ['codex', 'login', '--device-auth']
+        call(['docker', 'exec', '-it', m['container'], *command])
+    elif args.cmd == 'configure':
+        path = run_dir(args.run)
+        if latest(events(path), 'run_started'):
+            raise ValueError('Preparation is closed; use the timed rescue shell during execution')
+        print('Preparation only: configure auth and a dedicated remote. Do not edit source or task artifacts.')
+        call(['docker', 'exec', '-it', manifest(path)['container'], 'bash'])
+    elif args.cmd == 'attention':
+        attention_console(args)
+    elif args.cmd == 'shell':
+        rescue_shell(args)
+    elif args.cmd == 'mark':
+        mark(args)
+    elif args.cmd == 'finish':
+        finish(args)
+    elif args.cmd == 'assess':
+        assess(args)
+    elif args.cmd == 'recover':
+        path = run_dir(args.run)
+        # Stop only the manifest's exact container. Never guess from a process name or glob.
+        call(['docker', 'stop', '--time', '5', manifest(path)['container']], stdout=subprocess.DEVNULL)
+        with locked(path):
+            if active_session(events(path)):
+                emit(path, 'session_exited', exit_code=None, recovered=True)
+            emit(path, 'wrapper_recovered')
+        print('Container stopped. Finish as failed/abandoned; missing terminal data cannot be recovered.')
+    elif args.cmd == 'report':
+        rows = [summarize(manifest(p), events(p)) for p in sorted(RUNS.glob('*')) if (p/'manifest.json').exists()]
+        if args.csv and rows:
+            fields = [k for k in rows[0] if k != 'human_by_category']
+            writer = csv.DictWriter(sys.stdout, fieldnames=fields, extrasaction='ignore')
+            writer.writeheader()
+            writer.writerows(rows)
+        else:
+            print(json.dumps(rows, indent=2))
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except (ValueError, KeyError, OSError, subprocess.CalledProcessError) as exc:
+        print(f'ERROR: {exc}', file=sys.stderr)
+        sys.exit(1)

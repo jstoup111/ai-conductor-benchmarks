@@ -1,0 +1,17 @@
+{
+  "reviewer": "REPLACE with reviewer identity",
+  "evidence": "REPLACE with test logs and review references",
+  "criteria": {
+    "M1": false,
+    "M2": false,
+    "M3": false,
+    "M4": false,
+    "M5": false,
+    "M6": false,
+    "M7": false,
+    "M8": false
+  },
+  "regressions_pass": false,
+  "critical_defects": 0,
+  "maintainability": 3
+}

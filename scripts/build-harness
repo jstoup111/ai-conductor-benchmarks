@@ -1,0 +1,25 @@
+#!/usr/bin/env python3
+"""Build a harness image from a committed source snapshot, without host configuration."""
+import json
+from pathlib import Path
+import subprocess
+import sys
+import tarfile
+import tempfile
+root = Path(__file__).resolve().parents[1]
+if len(sys.argv) != 2:
+    sys.exit('Usage: scripts/build-harness /path/to/ai-conductor')
+source = Path(sys.argv[1]).resolve()
+sha = subprocess.check_output(['git','-C',str(source),'rev-parse','HEAD'],text=True).strip()
+with tempfile.TemporaryDirectory(prefix='acb-image-') as directory:
+    context = Path(directory)
+    archive = context/'source.tar'
+    with archive.open('wb') as stream:
+        subprocess.run(['git','-C',str(source),'archive','--format=tar','HEAD'],stdout=stream,check=True)
+    (context/'harness').mkdir()
+    with tarfile.open(archive) as tar:
+        tar.extractall(context/'harness', filter='data')
+    (context/'Dockerfile').write_text((root/'docker/Dockerfile.harness').read_text())
+    subprocess.run(['docker','build','--label','benchmark.harness.commit='+sha,
+                    '-t','ai-conductor-benchmarks:harness',str(context)],check=True)
+print('Harness image built from committed source '+sha+' (uncommitted edits excluded).')
