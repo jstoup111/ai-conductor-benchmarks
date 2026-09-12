@@ -10,3 +10,12 @@ ALLOWED = {
 }
 if len(sys.argv) < 3 or sys.argv[2] not in ALLOWED:
     sys.exit('Push refused: only jstoup111/ai-conductor-benchmarks is allowed. Never publish to basecamp/fizzy.')
+
+for line in sys.stdin:
+    fields = line.split()
+    if len(fields) != 4:
+        sys.exit('Push refused: malformed ref update')
+    local_ref, local_sha, remote_ref, remote_sha = fields
+    if remote_ref.startswith('refs/tags/eval/'):
+        if set(local_sha) == {'0'} or (set(remote_sha) != {'0'} and local_sha != remote_sha):
+            sys.exit('Push refused: eval tags cannot be deleted or replaced')

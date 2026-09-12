@@ -257,7 +257,7 @@ class PublicationAndReleaseTests(unittest.TestCase):
         }
         for url, allowed in cases.items():
             # Invoke the pure hook directly: never contact any git remote.
-            result = subprocess.run([str(hook), 'origin', url], capture_output=True)
+            result = subprocess.run([str(hook), 'origin', url], input=b'', capture_output=True)
             self.assertEqual(result.returncode == 0, allowed, url)
 
     def test_release_and_criterion_results_survive_report(self):

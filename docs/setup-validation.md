@@ -2,7 +2,7 @@
 
 Validated during repository setup on 2026-09-12:
 
-- `make check`: 23 runner tests passed, Python compilation passed, shell syntax passed.
+- `make check`: 33 runner tests passed, Python compilation passed, shell syntax passed.
 - Shared Docker image built, including Ruby/gems, both coding-agent CLIs, Chromium and GitHub CLI.
 - Harness Docker image built from committed harness source `d809d31d2c3c557d7f8e2443dda48a5247bf23e4`; its installer completed inside the image.
 - All 1,810 upstream Fizzy tracked files preserve their original content hashes and file modes under `fixtures/fizzy`.
@@ -20,3 +20,5 @@ Not exercised during setup: Rails database preparation/runtime startup, the exis
 The first later pilot should verify those runtime boundaries before collecting comparison results. Hidden executable acceptance tests are not supplied; the three criterion-based assessment forms support manual independent grading.
 
 Fork configuration: `jstoup111/ai-conductor-benchmarks` was created in the operator account. The basecamp remote was removed; origin and GitHub CLI default target the operator fork. Push-hook tests verify that both HTTPS and SSH Fizzy destinations are rejected. Creating the fork did not publish benchmark code or run any trial.
+
+Run-history setup tests exercise actual Git objects/tags in disposable temporary test repositories, source snapshots, checksum rejection, write-once tags, fork-only publication arguments, and generated release tables. No actual benchmark run tags or release metrics were created in this repository.
